@@ -1,0 +1,8 @@
+flask>=3.0,<4
+flask-cors>=4.0,<7
+gunicorn>=22.0,<24
+numpy>=1.26,<3
+requests>=2.31,<3
+PySocks>=1.7,<2
+paramiko>=3.4,<4
+ccxt>=4.3,<5
