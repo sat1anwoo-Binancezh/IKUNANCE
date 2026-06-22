@@ -91,6 +91,20 @@ if _cors_origins and _cors_origins != "*":
     CORS(app, origins=[item.strip() for item in _cors_origins.split(",") if item.strip()], supports_credentials=True)
 else:
     CORS(app)
+
+
+@app.after_request
+def add_frontend_cache_headers(response):
+    path = request.path or "/"
+    content_type = response.headers.get("Content-Type", "")
+    if response.status_code == 200 and content_type.startswith("text/html"):
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+    elif response.status_code == 200 and path.startswith("/assets/"):
+        response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    return response
+
+
 def _positive_int(value, default, minimum=1):
     try:
         parsed = int(value)
@@ -531,6 +545,22 @@ def _default_config():
         }
     }
 
+def _merge_alert_settings(existing=None, patch=None):
+    settings = dict(_default_config()["alert_settings"])
+    if isinstance(existing, dict):
+        settings.update(existing)
+    if isinstance(patch, dict):
+        settings.update(patch)
+    return settings
+
+def _merge_email_template(existing=None, patch=None):
+    template = dict(_default_config()["email_template"])
+    if isinstance(existing, dict):
+        template.update(existing)
+    if isinstance(patch, dict):
+        template.update(patch)
+    return template
+
 def _user_file(uid):
     safe = uid.replace('/', '_').replace('\\', '_').replace('..', '_')
     return os.path.join(USER_DATA_DIR, f'{safe}.json')
@@ -547,14 +577,16 @@ def load_user_config(uid):
                 saved = json.load(f)
             for k, v in saved.items():
                 if k == "alert_settings" and isinstance(v, dict):
-                    conf[k].update(v)
+                    conf[k] = _merge_alert_settings(conf.get(k), v)
                 elif k == "email_template" and isinstance(v, dict):
-                    conf[k].update(v)
+                    conf[k] = _merge_email_template(conf.get(k), v)
                 else:
                     conf[k] = v
         except:
             pass
     conf['watchlist'] = _normalize_watchlist(conf.get('watchlist', []))
+    conf['alert_settings'] = _merge_alert_settings(conf.get('alert_settings'))
+    conf['email_template'] = _merge_email_template(conf.get('email_template'))
     with _user_cache_lock:
         _user_cache[uid] = conf
     return conf
@@ -562,6 +594,8 @@ def load_user_config(uid):
 def save_user_config(uid, config):
     config = dict(config)
     config['watchlist'] = _normalize_watchlist(config.get('watchlist', []))
+    config['alert_settings'] = _merge_alert_settings(config.get('alert_settings'))
+    config['email_template'] = _merge_email_template(config.get('email_template'))
     with _user_cache_lock:
         _user_cache[uid] = config
     os.makedirs(USER_DATA_DIR, exist_ok=True)
@@ -1009,6 +1043,10 @@ _all_symbols_cache: dict = {}   # {exchange_id: {"data": [...], "ts": float}}
 _all_symbols_lock = threading.Lock()
 _market_movers_cache = {"data": [], "symbols": [], "ts": 0, "key": ""}
 _market_movers_lock = threading.Lock()
+_orion_market_cache = {"data": [], "ts": 0, "error": ""}
+_orion_market_lock = threading.Lock()
+_orion_rankings_cache = {"data": {}, "ts": 0, "error": ""}
+_orion_rankings_lock = threading.Lock()
 
 CORE_SEARCH_SYMBOLS = [
     'BTC/USDT','ETH/USDT','BNB/USDT','SOL/USDT','XRP/USDT','DOGE/USDT','ADA/USDT','AVAX/USDT','LINK/USDT','TON/USDT',
@@ -1226,6 +1264,218 @@ def _build_market_movers(ud=None):
         key=lambda item: item.get('percentage', 0),
     )[:5]
     return gainers + losers
+
+
+def _orion_change_1d(ticker):
+    tf1d = ticker.get("tf1d") or {}
+    value = tf1d.get("changePercent")
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _format_orion_symbol(raw):
+    symbol = str(raw or "").strip().upper()
+    if not symbol.endswith("USDT"):
+        return ""
+    return symbol
+
+
+def _orion_float(value, default=0.0):
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed == parsed else default
+
+
+def _orion_tf_metric(ticker, timeframe, metric, default=0.0):
+    frame = ticker.get(f"tf{timeframe}") or {}
+    if not isinstance(frame, dict):
+        return default
+    return _orion_float(frame.get(metric), default)
+
+
+def _orion_row(ticker, metric_value, metric_key):
+    symbol = _format_orion_symbol(ticker.get("symbol"))
+    if not symbol:
+        return None
+    price = _orion_float(ticker.get("price") or ticker.get("markPrice"))
+    return {
+        "symbol": symbol,
+        "displayName": f"{symbol}\u6c38\u7eed\u5408\u7ea6",
+        "price": price,
+        "change": metric_value,
+        "changePercent": metric_value,
+        "metric": metric_key,
+        "source": "orion",
+    }
+
+
+def _fetch_orion_screener_payload():
+    return _http_get_json(
+        "https://screener.orionterminal.com/api/screener",
+        proxy=os.environ.get("IKUNANCE_ORION_PROXY", ""),
+        timeout=12,
+    )
+
+
+def _build_orion_usdt_perpetuals(limit=10):
+    payload = _fetch_orion_screener_payload()
+    tickers = payload.get("tickers") if isinstance(payload, dict) else []
+    rows = []
+    for ticker in tickers or []:
+        if not isinstance(ticker, dict):
+            continue
+        symbol = _format_orion_symbol(ticker.get("symbol"))
+        if not symbol:
+            continue
+        change_1d = _orion_change_1d(ticker)
+        try:
+            price = float(ticker.get("price") or ticker.get("markPrice") or 0)
+        except (TypeError, ValueError):
+            price = 0.0
+        rows.append({
+            "symbol": symbol,
+            "displayName": f"{symbol}永续合约",
+            "price": price,
+            "change": change_1d,
+            "changePercent": change_1d,
+            "source": "orion",
+        })
+    rows.sort(key=lambda item: item.get("changePercent", 0), reverse=True)
+    return rows[:limit]
+
+
+def _build_orion_market_rankings(limit=8):
+    payload = _fetch_orion_screener_payload()
+    tickers = [
+        item for item in (payload.get("tickers") if isinstance(payload, dict) else []) or []
+        if isinstance(item, dict) and _format_orion_symbol(item.get("symbol"))
+    ]
+
+    def build_rank(metric_key, value_fn, sort_key=None, reverse=True):
+        rows = []
+        for ticker in tickers:
+            value = value_fn(ticker)
+            row = _orion_row(ticker, value, metric_key)
+            if row:
+                rows.append(row)
+        rows.sort(key=sort_key or (lambda item: item.get("changePercent", 0)), reverse=reverse)
+        return rows[:limit]
+
+    return {
+        "gainers": build_rank(
+            "1d_change",
+            lambda ticker: _orion_tf_metric(ticker, "1d", "changePercent"),
+            reverse=True,
+        ),
+        "losers": build_rank(
+            "1d_change",
+            lambda ticker: _orion_tf_metric(ticker, "1d", "changePercent"),
+            reverse=False,
+        ),
+        "oiMovers": build_rank(
+            "1h_oi_change",
+            lambda ticker: _orion_tf_metric(ticker, "1h", "oiChange"),
+            sort_key=lambda item: abs(item.get("changePercent", 0)),
+            reverse=True,
+        ),
+        "volumeSurges": build_rank(
+            "1h_volume_change",
+            lambda ticker: _orion_tf_metric(ticker, "1h", "volumeChange"),
+            reverse=True,
+        ),
+    }
+
+
+@app.route('/api/orion/market-rankings')
+def api_orion_market_rankings():
+    """Return ORION Binance USDT perpetual rankings for the market plaza."""
+    try:
+        limit = _positive_int(request.args.get("limit"), 8, minimum=1)
+        limit = min(limit, 20)
+        ttl = _positive_int(os.environ.get("IKUNANCE_ORION_CACHE_SECONDS"), 15, minimum=5)
+        now = time.time()
+        with _orion_rankings_lock:
+            if _orion_rankings_cache["data"] and now - _orion_rankings_cache["ts"] < ttl:
+                return jsonify({
+                    "status": "success",
+                    "source": "orion",
+                    "cached": True,
+                    "rankings": _orion_rankings_cache["data"],
+                    "updatedAt": _orion_rankings_cache["ts"],
+                })
+        rankings = _build_orion_market_rankings(limit=limit)
+        with _orion_rankings_lock:
+            _orion_rankings_cache["data"] = rankings
+            _orion_rankings_cache["ts"] = now
+            _orion_rankings_cache["error"] = ""
+        return jsonify({
+            "status": "success",
+            "source": "orion",
+            "cached": False,
+            "rankings": rankings,
+            "updatedAt": now,
+        })
+    except Exception as e:
+        with _orion_rankings_lock:
+            cached = dict(_orion_rankings_cache["data"] or {})
+            cached_ts = _orion_rankings_cache["ts"]
+            _orion_rankings_cache["error"] = str(e)
+        return jsonify({
+            "status": "success" if cached else "error",
+            "source": "orion",
+            "cached": bool(cached),
+            "rankings": cached,
+            "updatedAt": cached_ts,
+            "error": str(e),
+        })
+
+
+@app.route('/api/orion/usdt-perpetuals')
+def api_orion_usdt_perpetuals():
+    """Return ORION Binance USDT perpetual daily gainers for the market plaza."""
+    try:
+        limit = _positive_int(request.args.get("limit"), 10, minimum=1)
+        limit = min(limit, 30)
+        ttl = _positive_int(os.environ.get("IKUNANCE_ORION_CACHE_SECONDS"), 15, minimum=5)
+        now = time.time()
+        with _orion_market_lock:
+            if _orion_market_cache["data"] and now - _orion_market_cache["ts"] < ttl:
+                return jsonify({
+                    "status": "success",
+                    "source": "orion",
+                    "cached": True,
+                    "data": list(_orion_market_cache["data"])[:limit],
+                    "updatedAt": _orion_market_cache["ts"],
+                })
+        data = _build_orion_usdt_perpetuals(limit=limit)
+        with _orion_market_lock:
+            _orion_market_cache["data"] = data
+            _orion_market_cache["ts"] = now
+            _orion_market_cache["error"] = ""
+        return jsonify({
+            "status": "success",
+            "source": "orion",
+            "cached": False,
+            "data": data,
+            "updatedAt": now,
+        })
+    except Exception as e:
+        with _orion_market_lock:
+            cached = list(_orion_market_cache["data"])
+            cached_ts = _orion_market_cache["ts"]
+            _orion_market_cache["error"] = str(e)
+        return jsonify({
+            "status": "success" if cached else "error",
+            "source": "orion",
+            "cached": bool(cached),
+            "data": cached[:10],
+            "updatedAt": cached_ts,
+            "error": str(e),
+        })
 
 
 @app.route('/api/market_movers')
@@ -1470,6 +1720,9 @@ def _normalize_symbol(raw):
     symbol = str(raw or '').strip().upper()
     if ':' in symbol:
         symbol = symbol.split(':')[0]
+    symbol = re.sub(r'(\.P|PERP)$', '', symbol)
+    symbol = symbol.replace('/USDTUSDT', '/USDT')
+    symbol = symbol.replace('USDTUSDT', 'USDT')
     if not symbol:
         return ''
     if '/' not in symbol and symbol.endswith('USDT'):
@@ -2050,10 +2303,10 @@ def api_save():
             MANUAL_PROXY = p
             _ws_configure_proxy(MANUAL_PROXY)
     if 'alertSettings' in data:
-        if 'alert_settings' not in ud: ud['alert_settings'] = {}
         if isinstance(data['alertSettings'], dict):
-            ud['alert_settings'].update(data['alertSettings'])
-    if 'emailTemplate' in data and isinstance(data['emailTemplate'], dict): ud['email_template'] = data['emailTemplate']
+            ud['alert_settings'] = _merge_alert_settings(ud.get('alert_settings'), data['alertSettings'])
+    if 'emailTemplate' in data and isinstance(data['emailTemplate'], dict):
+        ud['email_template'] = _merge_email_template(ud.get('email_template'), data['emailTemplate'])
     if 'timeframe' in data and data['timeframe'] in ALLOWED_TIMEFRAMES: ud['timeframe'] = data['timeframe']
     if 'triggerMode' in data and data['triggerMode'] in ALLOWED_TRIGGER_MODES: ud['trigger_mode'] = data['triggerMode']
     if 'watchlistMode' in data: ud['watchlist_mode'] = _text_setting(data['watchlistMode'], 40)
@@ -2126,8 +2379,8 @@ def api_get_settings():
     return _user_json_response({
         "apiKey": ud.get('api_key', ''), "secretKey": ud.get('secret_key', ''),
         "email": ud.get('email', ''), "emailPass": ud.get('email_pass', ''),
-        "proxy": ud.get('proxy', ''), "emailTemplate": ud.get('email_template', {}),
-        "alertSettings": ud.get('alert_settings', {}),
+        "proxy": ud.get('proxy', ''), "emailTemplate": _merge_email_template(ud.get('email_template')),
+        "alertSettings": _merge_alert_settings(ud.get('alert_settings')),
         "timeframe": ud.get('timeframe', '15m'),
         "triggerMode": ud.get('trigger_mode', 'close'),
         "watchlistMode": ud.get('watchlist_mode', 'favorites'),

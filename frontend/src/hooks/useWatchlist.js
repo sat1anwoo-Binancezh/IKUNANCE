@@ -68,11 +68,14 @@ function makeItem(base, eid, extra = {}) {
   const exchangeId = eid || 'binance'
   const label = EXCHANGE_LABELS[exchangeId] || exchangeId.toUpperCase()
   const marketType = extra.marketType || (exchangeId === 'binance_stock' ? 'stock' : 'futures')
+  const display = String(extra.display || `${normalizedBase}USDT.P`)
+    .replace(/\b([A-Z0-9]{1,40})\/USDTUSDT\.P\b/g, '$1USDT.P')
+    .replace(/USDTUSDT\.P/g, 'USDT.P')
   return {
     key:        `${normalizedBase}/USDT@${exchangeId}`,   // 鍞竴鏍囪瘑锛屽彲璺ㄤ氦鏄撴墍閲嶅鍚屾爣鐨?
     symbol:     `${normalizedBase}/USDT`,
     exchangeId,
-    display:    extra.display || `${normalizedBase}USDT.P`,
+    display,
     exchangeLabel: extra.exchangeLabel || label,
     marketType,
   }

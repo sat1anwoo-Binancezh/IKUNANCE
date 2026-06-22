@@ -21,6 +21,14 @@ const MONITOR_TAB_KEY = 'ikun_monitor_tabs'
 const PUSH_SCOPE_KEY = 'ikun_push_scope'
 const DEFAULT_MONITOR_TABS = { io: true }
 const DEFAULT_PUSH_SCOPE = { groups: {} }
+const DEFAULT_ALERT_SETTINGS = {
+  app_push: false,
+  toast: true,
+  email: false,
+  webhook: false,
+  sound: false,
+  sound_type: 'beep',
+}
 
 function loadJson(key, fallback) {
   try { return { ...fallback, ...JSON.parse(localStorage.getItem(key) || '{}') } }
@@ -91,6 +99,29 @@ function safeStorageScope(scope) {
   return String(scope || 'anon').replace(/[^a-zA-Z0-9_.-]/g, '_').slice(0, 80) || 'anon'
 }
 
+function alertSettingsStorageKey(scope) {
+  return `ikun_alert_settings_${safeStorageScope(scope)}`
+}
+
+function normalizeAlertSettings(settings) {
+  return { ...DEFAULT_ALERT_SETTINGS, ...(settings && typeof settings === 'object' ? settings : {}) }
+}
+
+function readAlertSettingsStorage(scope) {
+  try {
+    const raw = JSON.parse(localStorage.getItem(alertSettingsStorageKey(scope)) || 'null')
+    return raw && typeof raw === 'object' ? normalizeAlertSettings(raw) : null
+  } catch {
+    return null
+  }
+}
+
+function writeAlertSettingsStorage(scope, settings) {
+  try {
+    localStorage.setItem(alertSettingsStorageKey(scope), JSON.stringify(normalizeAlertSettings(settings)))
+  } catch {}
+}
+
 function watchlistStorageKey(exchangeId, scope) {
   return `ikun_wl_${safeStorageScope(scope)}_${exchangeId || 'binance'}`
 }
@@ -129,7 +160,7 @@ function syncServerWatchlistToLocal(serverWatchlist, fallbackExchange, scope) {
       typeof item === 'string' ? fallbackExchange : (item?.exchange || item?.exchangeId || fallbackExchange)
     || 'binance').toLowerCase()
     if (!byExchange[exchangeId]) byExchange[exchangeId] = []
-    const base = symbol.replace('/USDT', '')
+    const base = symbol.replace(/\/USDT$/, '').replace(/USDT$/, '')
     const label = EXCHANGE_NAMES[exchangeId] || exchangeId.toUpperCase()
     byExchange[exchangeId].push({
       key: `${symbol}@${exchangeId}`,
@@ -164,15 +195,43 @@ function ShellPage({ title, subtitle, children }) {
 }
 
 function CommunityPage() {
+  const [blocked, setBlocked] = React.useState(false)
+  const [loaded, setLoaded] = React.useState(false)
+
+  React.useEffect(() => {
+    const timer = setTimeout(() => {
+      if (!loaded) setBlocked(true)
+    }, 3500)
+    return () => clearTimeout(timer)
+  }, [loaded])
+
   return (
     <div className="main-content">
-      <div style={{ flex: 1, minHeight: 0 }}>
+      <div style={{ flex: 1, minHeight: 0, position: 'relative' }}>
         <iframe
-          src="https://www.binance.com/zh-CN/square"
-          title="Binance Square"
+          src="https://followin.io/"
+          title="Followin"
+          onLoad={() => setLoaded(true)}
           style={{ width: '100%', height: '100%', border: 'none', background: '#000' }}
           sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-storage-access-by-user-activation"
         />
+        {blocked && (
+          <div style={{
+            position: 'absolute',
+            inset: 0,
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: 14,
+            background: 'var(--bg-color)',
+            color: 'var(--text-secondary)',
+          }}>
+            <div style={{ color: 'var(--text-primary)', fontSize: 18, fontWeight: 800 }}>Followin 暂时阻止了内嵌浏览</div>
+            <div style={{ fontSize: 13 }}>点击下方按钮在独立窗口打开 Followin 市场资讯。</div>
+            <a className="icon-btn login-btn" href="https://followin.io/" target="_blank" rel="noopener noreferrer" style={{ textDecoration: 'none' }}>打开 Followin</a>
+          </div>
+        )}
       </div>
     </div>
   )
@@ -429,6 +488,16 @@ function IoBrowser() {
 }
 // ────────────────────────────────────────────────────────────
 
+function MarketPage() {
+  return (
+    <div className="main-content">
+      <div style={{ flex: 1, minHeight: 0, padding: '12px 24px 24px' }}>
+        <IoBrowser />
+      </div>
+    </div>
+  )
+}
+
 export default function App({ currentUser, onOpenLogin, doLogout: propDoLogout, onNavigate, activePage, activeIndicator, onClearIndicator, externalExchange }) {
   // ── UI 状态 ──
   const [activeTab, setActiveTab] = useState('watchlist')
@@ -463,7 +532,7 @@ export default function App({ currentUser, onOpenLogin, doLogout: propDoLogout, 
   // ── 设置配置 ──
   const [authToken, setAuthToken] = useState(localStorage.getItem('ikun_token') || '')
   const [cfg, setCfg] = useState({ apiKey: '', secretKey: '', email: '', emailPass: '', proxy: '', doubaoApiKey: '' })
-  const [alertSettings, setAlertSettings] = useState({ app_push: false, toast: true, email: false, sound: false, sound_type: 'beep' })
+  const [alertSettings, setAlertSettings] = useState(DEFAULT_ALERT_SETTINGS)
   const [currentExchange, setCurrentExchange] = useState(
     () => externalExchange || localStorage.getItem('ikun_exchange') || 'binance'
   )
@@ -535,12 +604,26 @@ export default function App({ currentUser, onOpenLogin, doLogout: propDoLogout, 
   }, [authToken])
 
   const requestedPage = activePage || localPage
-  const effectivePage = requestedPage === 'market' ? 'monitor' : requestedPage
+  const effectivePage = requestedPage || 'monitor'
+  const navActivePage = effectivePage === 'monitor' && activeTab === 'alerts' ? 'signals' : effectivePage
   const effectiveUser = currentUser || localUser
   const storageScope = effectiveUser?.email || 'anon'
   const handleNavigate = useCallback((page) => {
-    if (onNavigate) onNavigate(page)
-    else setLocalPage(page)
+    if (page === 'settings') {
+      setModalOpen(true)
+      setModalTab('api')
+      return
+    }
+    let nextPage = page
+    if (page === 'monitor') {
+      setActiveTab('watchlist')
+    }
+    if (page === 'signals') {
+      setActiveTab('alerts')
+      nextPage = 'monitor'
+    }
+    if (onNavigate) onNavigate(nextPage)
+    else setLocalPage(nextPage)
   }, [onNavigate])
 
   useEffect(() => {
@@ -659,10 +742,12 @@ export default function App({ currentUser, onOpenLogin, doLogout: propDoLogout, 
   // ── 初始化加载设置，登录/切换账号后重新加载（同步watchlist） ──
   useEffect(() => {
     if (currentUser !== undefined || localUser) {
+      const localAlertSettings = readAlertSettingsStorage(storageScope)
+      if (localAlertSettings) setAlertSettings(localAlertSettings)
       loadSettings()
       loadCustomSounds()
     }
-  }, [currentUser, localUser, authToken])
+  }, [currentUser, localUser, authToken, storageScope])
 
   function loadSettings() {
     fetch('/api/get_settings', { headers: apiHeaders() }).then(r => r.json()).then(d => {
@@ -674,7 +759,11 @@ export default function App({ currentUser, onOpenLogin, doLogout: propDoLogout, 
         proxy: d.proxy || '',
         doubaoApiKey: d.doubaoApiKey || '',
       })
-      if (d.alertSettings) setAlertSettings(v => ({ ...v, ...d.alertSettings }))
+      if (d.alertSettings) {
+        const mergedAlertSettings = normalizeAlertSettings(d.alertSettings)
+        setAlertSettings(mergedAlertSettings)
+        writeAlertSettingsStorage(storageScope, mergedAlertSettings)
+      }
       if (d.emailTemplate) setEmailTemplate(v => ({ ...v, ...d.emailTemplate }))
       if (d.timeframe) setTimeframe(d.timeframe)
       if (d.triggerMode) setTriggerMode(d.triggerMode)
@@ -704,9 +793,10 @@ export default function App({ currentUser, onOpenLogin, doLogout: propDoLogout, 
     // 如果 timeframe 发生变化，同时更新 state
     if (tf && tf !== timeframe) setTimeframe(tf)
     if (wm && watchlistMode !== 'favorites') setWatchlistMode('favorites')
-    const settings = { ...next }
+    const settings = normalizeAlertSettings(next)
     delete settings._timeframe  // 去掉内部传递字段
     setAlertSettings(settings)
+    writeAlertSettingsStorage(storageScope, settings)
     fetch('/api/save_settings', {
       method: 'POST',
       headers: apiHeaders({ 'Content-Type': 'application/json' }),
@@ -725,6 +815,9 @@ export default function App({ currentUser, onOpenLogin, doLogout: propDoLogout, 
   }
 
   function saveSettings() {
+    const settings = normalizeAlertSettings(alertSettings)
+    setAlertSettings(settings)
+    writeAlertSettingsStorage(storageScope, settings)
     fetch('/api/save_settings', {
       method: 'POST',
       headers: apiHeaders({ 'Content-Type': 'application/json' }),
@@ -732,7 +825,7 @@ export default function App({ currentUser, onOpenLogin, doLogout: propDoLogout, 
         apiKey: cfg.apiKey, secretKey: cfg.secretKey,
         email: cfg.email, emailPass: cfg.emailPass, proxy: cfg.proxy,
         doubaoApiKey: cfg.doubaoApiKey,
-        timeframe, triggerMode, watchlistMode: 'favorites', emailTemplate, alertSettings,
+        timeframe, triggerMode, watchlistMode: 'favorites', emailTemplate, alertSettings: settings,
         exchangeId: currentExchange,
         watchlist: currentWatchlistPayload(),
       })
@@ -746,10 +839,12 @@ export default function App({ currentUser, onOpenLogin, doLogout: propDoLogout, 
   function sendTestEmail() {
     setTestEmailLoading(true)
     setTestEmailResult('')
+    const settings = normalizeAlertSettings(alertSettings)
+    writeAlertSettingsStorage(storageScope, settings)
     fetch('/api/save_settings', {
       method: 'POST',
       headers: apiHeaders({ 'Content-Type': 'application/json' }),
-      body: JSON.stringify({ email: cfg.email, emailPass: cfg.emailPass })
+      body: JSON.stringify({ email: cfg.email, emailPass: cfg.emailPass, alertSettings: settings })
     }).then(() => {
       return fetch('/api/test_email', { method: 'POST', headers: apiHeaders({ 'Content-Type': 'application/json' }), body: '{}' })
     }).then(r => r.json()).then(d => {
@@ -820,7 +915,7 @@ export default function App({ currentUser, onOpenLogin, doLogout: propDoLogout, 
       <SignalAlertContainer signals={signalAlerts} onDismiss={dismissAlert} />
 
       <GlobalNav
-        activePage={effectivePage}
+        activePage={navActivePage}
         onNavigate={handleNavigate}
         currentUser={effectiveUser}
         onOpenLogin={onOpenLogin || (() => setShowAuthModal(true))}
@@ -829,8 +924,14 @@ export default function App({ currentUser, onOpenLogin, doLogout: propDoLogout, 
 
       {effectivePage !== 'monitor' && (
         <div className="app-container">
+          {effectivePage === 'market' && <MarketPage />}
           {effectivePage === 'community' && <CommunityPage />}
           {effectivePage === 'indicators' && <IndicatorsPage apiHeaders={apiHeaders} />}
+          {effectivePage === 'premium' && (
+            <ShellPage title="会员" subtitle="会员功能保持原项目入口，当前版本未启用付费墙。">
+              <div style={{ color: 'var(--text-secondary)', fontSize: 13 }}>请在设置中配置通知、交易所和模型参数。</div>
+            </ShellPage>
+          )}
         </div>
       )}
 

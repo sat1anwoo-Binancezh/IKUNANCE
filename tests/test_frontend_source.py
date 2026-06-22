@@ -20,6 +20,7 @@ class FrontendSourceTests(unittest.TestCase):
             "src/App.jsx",
             "src/GlobalNav.jsx",
             "src/styles/app.css",
+            "src/styles/global-nav.css",
             "src/hooks/useAudio.js",
             "src/hooks/useAlerts.js",
             "src/hooks/useSignalStream.js",
@@ -40,8 +41,11 @@ class FrontendSourceTests(unittest.TestCase):
         watchlist_source = (FRONTEND_ROOT / "src/hooks/useWatchlist.js").read_text(encoding="utf-8")
         app_source = (FRONTEND_ROOT / "src/App.jsx").read_text(encoding="utf-8")
         nav_source = (FRONTEND_ROOT / "src/GlobalNav.jsx").read_text(encoding="utf-8")
+        nav_css = (FRONTEND_ROOT / "src/styles/global-nav.css").read_text(encoding="utf-8")
+        app_css = (FRONTEND_ROOT / "src/styles/app.css").read_text(encoding="utf-8")
         alerts_source = (FRONTEND_ROOT / "src/hooks/useAlerts.js").read_text(encoding="utf-8")
         stream_source = (FRONTEND_ROOT / "src/hooks/useSignalStream.js").read_text(encoding="utf-8")
+        alerts_tab_source = (FRONTEND_ROOT / "src/components/AlertsTab.jsx").read_text(encoding="utf-8")
 
         self.assertIn("const WATCHLIST_LIMIT = 20", watchlist_source)
         self.assertIn("const [marketMovers, setMarketMovers] = useState([])", watchlist_source)
@@ -54,13 +58,35 @@ class FrontendSourceTests(unittest.TestCase):
         self.assertIn("res.status === 'ok'", app_source)
         self.assertIn("if (Array.isArray(d.watchlist))", app_source)
         self.assertIn("syncServerWatchlistToLocal(d.watchlist", app_source)
+        self.assertIn("DEFAULT_ALERT_SETTINGS", app_source)
+        self.assertIn("ikun_alert_settings_", app_source)
+        self.assertIn("writeAlertSettingsStorage(storageScope, settings)", app_source)
+        self.assertIn("normalizeAlertSettings(d.alertSettings)", app_source)
         self.assertIn("ALERT_LOG_KEY}_", alerts_source)
         self.assertIn("params.set('token', token)", stream_source)
-        self.assertNotIn("onNavigate?.('market')", nav_source)
-        self.assertNotIn("<MarketPage", app_source)
+        self.assertIn("gn-nav", nav_source)
+        self.assertIn("gn-logo", nav_source)
+        self.assertIn("THEMES", nav_source)
+        self.assertIn(".gn-nav", nav_css)
+        self.assertIn(".gn-btn--premium", nav_css)
+        self.assertIn(":root{--bg-color:#030812", app_css)
+        self.assertIn("<MarketPage", app_source)
+        self.assertIn("effectivePage === 'market'", app_source)
+        self.assertNotIn("requestedPage === 'market' ? 'monitor'", app_source)
+        self.assertIn("const navActivePage = effectivePage === 'monitor' && activeTab === 'alerts' ? 'signals' : effectivePage", app_source)
+        self.assertIn('activePage={navActivePage}', app_source)
+        self.assertIn('https://followin.io/', app_source)
+        self.assertNotIn('title="Binance Square"', app_source)
+        self.assertIn("formatCopySymbol", alerts_tab_source)
+        self.assertIn("copyText(formatCopySymbol(item.symbol))", alerts_tab_source)
+        self.assertNotIn("hasDropdown", nav_source)
         self.assertIn("structured=1", watchlist_source)
         self.assertIn("res?.records", watchlist_source)
         self.assertIn("binance_stock", watchlist_source)
+        index_source = (FRONTEND_ROOT / "index.html").read_text(encoding="utf-8")
+        self.assertIn("__ikunBootGuardInstalled", index_source)
+        self.assertIn("/assets/ikun-runtime-fixes.js", index_source)
+        self.assertTrue((FRONTEND_ROOT / "public/assets/ikun-runtime-fixes.js").exists())
 
     def test_frontend_build_succeeds_when_dependencies_are_installed(self):
         if not (FRONTEND_ROOT / "node_modules").exists():

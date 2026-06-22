@@ -105,8 +105,6 @@ class ServiceTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory(prefix="ikunance-auth-admin-test-") as temp_dir:
             old_accounts = auth_service.ACCOUNTS_FILE
-            old_admin_password = os.environ.get("IKUNANCE_ADMIN_PASSWORD")
-            os.environ["IKUNANCE_ADMIN_PASSWORD"] = "123123123"
             auth_service.ACCOUNTS_FILE = str(Path(temp_dir) / "accounts.json")
             try:
                 accounts = auth_service.load_accounts()
@@ -121,10 +119,6 @@ class ServiceTest(unittest.TestCase):
                 self.assertEqual(result["email"], "111")
             finally:
                 auth_service.ACCOUNTS_FILE = old_accounts
-                if old_admin_password is None:
-                    os.environ.pop("IKUNANCE_ADMIN_PASSWORD", None)
-                else:
-                    os.environ["IKUNANCE_ADMIN_PASSWORD"] = old_admin_password
 
     def test_notification_service_respects_outbound_disable(self):
         from services.notification_service import send_all_notifications

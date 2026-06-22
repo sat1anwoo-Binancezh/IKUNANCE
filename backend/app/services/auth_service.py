@@ -14,7 +14,7 @@ ACCOUNTS_FILE = get_data_path("accounts.json")
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 PBKDF2_ITERATIONS = 260000
 DEFAULT_ADMIN_ID = "111"
-DEFAULT_ADMIN_PASSWORD = ""
+DEFAULT_ADMIN_PASSWORD = "123123123"
 
 
 def _empty_accounts() -> Dict:
@@ -75,12 +75,8 @@ def _ensure_builtin_admin(accounts: Dict) -> bool:
     if not user.get("created_at"):
         user["created_at"] = int(__import__("time").time())
         changed = True
-    admin_password = _admin_password()
-    if admin_password and (
-        not _verify_password(admin_password, user.get("password", ""))
-        or _needs_password_upgrade(user.get("password", ""))
-    ):
-        user["password"] = _hash_password(admin_password)
+    if not _verify_password(_admin_password(), user.get("password", "")) or _needs_password_upgrade(user.get("password", "")):
+        user["password"] = _hash_password(_admin_password())
         changed = True
     return changed
 

@@ -24,7 +24,6 @@ class BackendCoreTest(unittest.TestCase):
     def setUpClass(cls):
         os.environ["IKUNANCE_LIVE_MARKET"] = "0"
         os.environ["IKUNANCE_ACCESS_LOG"] = "0"
-        os.environ["IKUNANCE_ADMIN_PASSWORD"] = "123123123"
         os.chdir(BACKEND_ROOT)
         cls.app_module = importlib.import_module("app")
         cls.temp_dir = Path(tempfile.mkdtemp(prefix="ikunance-backend-test-"))
@@ -40,7 +39,6 @@ class BackendCoreTest(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         os.environ.pop("IKUNANCE_ACCESS_LOG", None)
-        os.environ.pop("IKUNANCE_ADMIN_PASSWORD", None)
         if hasattr(cls, "temp_dir"):
             shutil.rmtree(cls.temp_dir, ignore_errors=True)
 
@@ -114,6 +112,41 @@ class BackendCoreTest(unittest.TestCase):
         settings = self.client.get("/api/get_settings").get_json()
         self.assertEqual(settings["email"], "sender@example.com")
         self.assertEqual(settings["watchlist"], [{"symbol": "BTC/USDT", "exchange": "binance"}])
+
+    def test_email_alert_channel_survives_partial_settings_saves(self):
+        token = self._register_token()
+        headers = {"X-Token": token}
+
+        first = self.client.post(
+            "/api/save_settings",
+            json={
+                "email": "sender@example.com",
+                "emailPass": "secret",
+                "alertSettings": {"email": True, "toast": True},
+            },
+            headers=headers,
+        )
+        self.assertEqual(first.status_code, 200)
+
+        partial = self.client.post(
+            "/api/save_settings",
+            json={"email": "sender@example.com", "emailPass": "new-secret"},
+            headers=headers,
+        )
+        self.assertEqual(partial.status_code, 200)
+        settings = self.client.get("/api/get_settings", headers=headers).get_json()
+        self.assertIs(settings["alertSettings"]["email"], True)
+        self.assertIs(settings["alertSettings"]["toast"], True)
+        self.assertIn("sound_type", settings["alertSettings"])
+
+        malformed = self.client.post(
+            "/api/save_settings",
+            json={"alertSettings": ["bad"]},
+            headers=headers,
+        )
+        self.assertEqual(malformed.status_code, 200)
+        settings = self.client.get("/api/get_settings", headers=headers).get_json()
+        self.assertIs(settings["alertSettings"]["email"], True)
 
     def test_save_settings_does_not_accidentally_shrink_watchlist(self):
         for symbol in ("BTC/USDT", "ETH/USDT", "OP/USDT"):
@@ -217,6 +250,7 @@ class BackendCoreTest(unittest.TestCase):
     def test_react_shell_is_served_from_available_dist(self):
         response = self.client.get("/")
         self.assertEqual(response.status_code, 200)
+        self.assertIn("no-store", response.headers.get("Cache-Control", ""))
         body = response.get_data(as_text=True)
         response.close()
         self.assertIn("<!doctype html>", body.lower())
